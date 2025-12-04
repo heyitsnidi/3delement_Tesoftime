@@ -1,332 +1,338 @@
-// sketch.js
-// TESSERACT OF TIME — Black & White generative interactive piece
-// Uses a 4D hypercube (tesseract) projection and interactive generative rules.
-// Author: (yours) — adapt freely.
+// src/main.js
+// Tesseract of Time — Three.js implementation (lightweight, no external GUI libs)
 
-let verts4D = [];    // 16 vertices of hypercube in 4D
-let edges = [];      // pairs of indices that form edges
-let angle = { xy: 0, xz: 0, xw: 0, yz: 0, yw: 0, zw: 0 };
-let pxMouse, pyMouse;
-let paused = false;
+import * as THREE from 'https://unpkg.com/three@0.156.0/build/three.module.js';
 
-let history = [];    // stores recent ghost frames (each is array of 2D points)
-const HISTORY_MAX = 42;
-let lastMoveTime = 0;
-let lingerStart = 0;
-let lastMouse = { x: 0, y: 0 };
-let lastVel = 0;
-let burstCooldown = 0;
+// Utilities
+function easeInOutQuad(t) {
+  return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+}
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
-function setup() {
-    createCanvas(windowWidth, windowHeight);
-    pixelDensity(1);
-    initTesseract();
-    strokeJoin(ROUND);
-    strokeCap(ROUND);
-    frameRate(60);
+// Scene & renderer scaffold
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0a);
 
-    pxMouse = mouseX;
-    pyMouse = mouseY;
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+container.appendChild(renderer.domElement);
 
-    // UI buttons
-    const saveBtn = document.getElementById('saveBtn');
-    const clearBtn = document.getElementById('clearBtn');
-    const pauseBtn = document.getElementById('pauseBtn');
+// Camera
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
+camera.position.set(0, 0, 1000);
 
-    saveBtn.onclick = () => {
-        // freeze for a crisp export
-        saveCanvas('tesseract-of-time', 'png');
-    };
+// Root group for global tesseract-like motion
+const tGroup = new THREE.Group();
+scene.add(tGroup);
 
-    clearBtn.onclick = () => {
-        history = [];
-        clearCanvasImmediately();
-    };
+// Zones color palettes and blending behavior
+const ZONES = {
+  PAST: { id: 'PAST', base: 0x525252, alpha: 0.35, blending: THREE.NormalBlending },
+  PRESENT: { id: 'PRESENT', base: 0xeaeff6, alpha: 0.95, blending: THREE.NormalBlending },
+  NEAR: { id: 'NEAR', base: 0x8de4d8, alpha: 0.8, blending: THREE.NormalBlending },
+  FAR: { id: 'FAR', base: 0xb88cf6, alpha: 0.9, blending: THREE.AdditiveBlending }
+};
 
-    pauseBtn.onclick = () => {
-        paused = !paused;
-        pauseBtn.innerText = paused ? 'Resume' : 'Pause';
-    };
+// Data structure for panels
+const panels = [];
 
-    lastMoveTime = millis();
-    lingerStart = millis();
+// Panel layout config: we'll create a small tesseract-like cluster with panels grouped in 4 zones
+const PANEL_CONFIGS = [
+  { zone: ZONES.PAST, count: 6, radius: 240, yOffset: -120, texts: ['memory', 'echo', 'yesterday'] },
+  { zone: ZONES.PRESENT, count: 8, radius: 0, yOffset: 0, texts: ['now', 'present', 'breathe'] },
+  { zone: ZONES.NEAR, count: 6, radius: 220, yOffset: 110, texts: ['soon', 'almost', 'near'] },
+  { zone: ZONES.FAR, count: 4, radius: 380, yOffset: 60, texts: ['future', 'echoes', 'beyond'] }
+];
+
+// Create text texture helper (canvas)
+function createTextTexture(text, bgColor, fgColor, opacity = 1) {
+  const size = 1024;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+
+  // background with slight transparency
+  ctx.fillStyle = `rgba(${(bgColor >> 16) & 0xff}, ${(bgColor >> 8) & 0xff}, ${bgColor & 0xff}, ${opacity})`;
+  ctx.fillRect(0, 0, size, size);
+
+  // text
+  ctx.fillStyle = fgColor;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // responsive font size based on text length
+  const fontSize = Math.floor(size * 0.12);
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  wrapText(ctx, text, size / 2, size / 2, size * 0.8, fontSize * 1.1);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
 }
 
-function initTesseract() {
-    verts4D = [];
-    edges = [];
-    // 16 vertices: each coordinate is -1 or +1
-    for (let a = 0; a < 16; a++) {
-        let v = [];
-        for (let d = 0; d < 4; d++) {
-            v[d] = ((a >> d) & 1) ? 1 : -1;
-        }
-        verts4D.push(v);
-    }
-    // edges: connect vertices that differ by exactly one coordinate
-    for (let i = 0; i < verts4D.length; i++) {
-        for (let j = i + 1; j < verts4D.length; j++) {
-            let diffs = 0;
-            for (let k = 0; k < 4; k++) {
-                if (verts4D[i][k] !== verts4D[j][k]) diffs++;
-            }
-            if (diffs === 1) edges.push([i, j]);
-        }
-    }
-}
-
-function windowResized() {
-    resizeCanvas(windowWidth, windowHeight);
-    clearCanvasImmediately();
-}
-
-function clearCanvasImmediately() {
-    // Full black background
-    push();
-    blendMode(BLEND);
-    clear();
-    background(0);
-    pop();
-}
-
-function draw() {
-    if (paused) {
-        // still render a subtle overlay so user can interact with UI
-        return;
-    }
-
-    // subtle fade (keeps echoes but decays)
-    push();
-    drawFade();
-    pop();
-
-    // compute input-driven parameters
-    let mx = (mouseX === undefined) ? pmouseX : mouseX;
-    let my = (mouseY === undefined) ? pmouseY : mouseY;
-    let nx = map(mx, 0, width, -1, 1);
-    let ny = map(my, 0, height, -1, 1);
-
-    // rotation speeds influenced by mouse position
-    let baseSpeed = 0.0015 + map(dist(mx, my, pmouseX, pmouseY), 0, 60, 0, 0.02);
-    // small automatic rotation to keep alive
-    angle.xy += baseSpeed * (0.6 + nx);
-    angle.xz += baseSpeed * (0.4 + ny);
-    angle.xw += baseSpeed * (0.25 + nx * -0.5);
-    angle.yz += baseSpeed * (0.2 + ny * 0.5);
-    angle.yw += baseSpeed * (0.15 + nx * 0.2);
-    angle.zw += baseSpeed * (0.12 + ny * -0.2);
-
-    // compute rotation matrix in 4D by combining plane rotations
-    let rotated = [];
-    for (let i = 0; i < verts4D.length; i++) {
-        let v = verts4D[i].slice(); // copy [x,y,z,w]
-        v = rotate4D(v, 'xy', angle.xy);
-        v = rotate4D(v, 'xz', angle.xz);
-        v = rotate4D(v, 'xw', angle.xw);
-        v = rotate4D(v, 'yz', angle.yz);
-        v = rotate4D(v, 'yw', angle.yw);
-        v = rotate4D(v, 'zw', angle.zw);
-        rotated.push(v);
-    }
-
-    // project 4D -> 3D -> 2D with simple perspective that uses 'w' as time depth
-    let points2D = rotated.map(p => project4Dto2D(p));
-
-    // compute speed / acceleration and linger time
-    let velocity = dist(mx, my, lastMouse.x, lastMouse.y) / max(1, deltaTime || 16);
-    let acceleration = abs(velocity - lastVel);
-    lastVel = velocity;
-    lastMouse.x = mx; lastMouse.y = my;
-
-    // burst detection: sudden acceleration creates shards
-    if (acceleration > 0.8 && burstCooldown <= 0) {
-        createBurst(points2D, velocity);
-        burstCooldown = 12; // cooldown frames
-    }
-    if (burstCooldown > 0) burstCooldown--;
-
-    // store history for echoing: push a copy of current projected segments
-    history.push(serializeFrame(points2D));
-    if (history.length > HISTORY_MAX) history.shift();
-
-    // Draw faded ghost layers (older frames are fainter)
-    drawHistoryLines(history);
-
-    // draw current tesseract in crisp white lines
-    strokeWeight(map(velocity, 0, 8, 0.5, 2.6, true));
-    stroke(255, 230); // main edges slightly luminous
-    noFill();
-    push();
-    translate(width / 2, height / 2);
-    // draw edges
-    for (let e of edges) {
-        let a = points2D[e[0]];
-        let b = points2D[e[1]];
-        if (!a || !b) continue;
-        line(a.x, a.y, b.x, b.y);
-    }
-    // draw intense center "origin" when stillness accumulates
-    let lingerTime = (millis() - lingerStart) / 1000;
-    if (velocity < 0.4) {
-        // increase linger
-        // draw layered shimmers to show memory accumulation
-        let layers = min(9, floor(lingerTime * 1.8));
-        for (let i = 1; i <= layers; i++) {
-            stroke(255, map(i, 1, layers, 30, 140));
-            strokeWeight(0.6 + i * 0.2);
-            beginShape();
-            for (let v of points2D) vertex(v.x, v.y);
-            endShape(CLOSE);
-        }
+// text wrapping helper
+function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+  const words = text.split(' ');
+  let line = '';
+  let testY = y - lineHeight;
+  const lines = [];
+  for (let n = 0; n < words.length; n++) {
+    const testLine = line + words[n] + ' ';
+    const metrics = ctx.measureText(testLine);
+    const testWidth = metrics.width;
+    if (testWidth > maxWidth && n > 0) {
+      lines.push(line.trim());
+      line = words[n] + ' ';
     } else {
-        lingerStart = millis(); // reset linger counter when moving
+      line = testLine;
+    }
+  }
+  lines.push(line.trim());
+  const startY = testY - (lines.length - 1) * (lineHeight / 2);
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], x, startY + i * lineHeight);
+  }
+}
+
+// Build panels and place them in 3D around center
+function buildPanels() {
+  const baseGeom = new THREE.PlaneGeometry(260, 160, 1, 1);
+  PANEL_CONFIGS.forEach((cfg, ci) => {
+    for (let i = 0; i < cfg.count; i++) {
+      const angle = (i / cfg.count) * Math.PI * 2 + (ci * 0.25);
+      const radius = cfg.radius;
+      const x = Math.cos(angle) * (radius + (Math.random() - 0.5) * 30);
+      const y = cfg.yOffset + (Math.sin(angle * 1.3) * 40) + (Math.random() - 0.5) * 20;
+      const z = Math.sin(angle) * (radius * 0.6) + (Math.random() - 0.5) * 80;
+
+      const texts = [...cfg.texts]; // copy
+      // ensure at least two states
+      if (texts.length < 2) texts.push(texts[0]);
+
+      const frontTex = createTextTexture(texts[0], cfg.zone.base, '#111111', cfg.zone.alpha);
+      const mat = new THREE.MeshBasicMaterial({
+        map: frontTex,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 1,
+        blending: cfg.zone.blending,
+        depthWrite: false
+      });
+
+      const mesh = new THREE.Mesh(baseGeom, mat);
+      mesh.position.set(x, y, z);
+      // random initial rotation for variety
+      mesh.rotation.set((Math.random() - 0.5) * 0.6, (Math.random() - 0.5) * 1.6, (Math.random() - 0.5) * 0.2);
+
+      // panel data
+      const panel = {
+        mesh,
+        zone: cfg.zone,
+        texts,
+        current: 0,
+        flip: { active: false, start: 0, duration: 700, axis: 'y' },
+        frontTexture: frontTex
+      };
+
+      // small subtle card bevel simulated by border: create a thin border plane (backdrop)
+      const backMat = new THREE.MeshBasicMaterial({
+        color: cfg.zone.base,
+        transparent: true,
+        opacity: cfg.zone.alpha * 0.65,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
+      const backPlane = new THREE.Mesh(new THREE.PlaneGeometry(266, 166), backMat);
+      backPlane.position.set(0, 0, -0.5);
+      mesh.add(backPlane);
+
+      tGroup.add(mesh);
+      panels.push(panel);
+    }
+  });
+}
+
+// flip a panel to next state
+function triggerFlip(panel, speedFactor = 1.0, axis = 'y') {
+  if (panel.flip.active) return; // already flipping
+  panel.flip.active = true;
+  panel.flip.start = performance.now();
+  panel.flip.duration = clamp(400 * (1 / speedFactor), 360, 1100);
+  panel.flip.axis = axis;
+}
+
+// Update flip animations (swap texture at mid-flip)
+function updateFlips(now) {
+  panels.forEach(p => {
+    if (!p.flip.active) return;
+    const elapsed = now - p.flip.start;
+    const t = clamp(elapsed / p.flip.duration, 0, 1);
+    const eased = easeInOutQuad(t);
+    const rot = eased * Math.PI; // rotate 0..PI
+    if (p.flip.axis === 'y') p.mesh.rotation.y = rot + (p.mesh.rotation.y - (p.mesh.rotation.y % (2 * Math.PI)));
+    else p.mesh.rotation.x = rot + (p.mesh.rotation.x - (p.mesh.rotation.x % (2 * Math.PI)));
+
+    // halfway through, swap to next text once
+    if (!p._swapped && t >= 0.5) {
+      p._swapped = true;
+      p.current = (p.current + 1) % p.texts.length;
+      const newTex = createTextTexture(p.texts[p.current], p.zone.base, '#111111', p.zone.alpha);
+      p.mesh.material.map = newTex;
+      p.mesh.material.needsUpdate = true;
+      p.frontTexture = newTex;
     }
 
-    pop();
-    // draw a subtle central seed point
-    push();
-    translate(width / 2, height / 2);
-    noStroke();
-    fill(255, 14);
-    ellipse(0, 0, 14, 14);
-    pop();
-
-    // small UI overlay for current "time pressure" — minimal and monochrome
-    drawHUD(velocity);
-
-    // decrement subtle global overlay influences
-    lastMoveTime = millis();
-}
-
-function drawFade() {
-    // Draw semi-transparent black rectangle to fade previous frames
-    // This keeps trails/echoes while letting new lines be crisp.
-    noStroke();
-    fill(0, 12); // low alpha to create long tails
-    rect(0, 0, width, height);
-}
-
-function drawHUD(velocity) {
-    // Draw small thin ring around center showing time pressure
-    push();
-    translate(width / 2, height / 2);
-    noFill();
-    stroke(255, 28);
-    strokeWeight(1);
-    ellipse(0, 0, map(velocity, 0, 8, 30, 180, true));
-    pop();
-}
-
-// --- 4D rotation helper ---
-function rotate4D(v, plane, t) {
-    // v: [x,y,z,w]
-    let x = v[0], y = v[1], z = v[2], w = v[3];
-    let c = cos(t), s = sin(t);
-    switch (plane) {
-        case 'xy': return [x * c - y * s, x * s + y * c, z, w];
-        case 'xz': return [x * c - z * s, y, x * s + z * c, w];
-        case 'xw': return [x * c - w * s, y, z, x * s + w * c];
-        case 'yz': return [x, y * c - z * s, y * s + z * c, w];
-        case 'yw': return [x, y * c - w * s, z, y * s + w * c];
-        case 'zw': return [x, y, z * c - w * s, z * s + w * c];
+    if (t >= 1) {
+      p.flip.active = false;
+      p._swapped = false;
+      // normalize rotation to 0..2PI range and keep final orientation
+      if (p.flip.axis === 'y') p.mesh.rotation.y = p.mesh.rotation.y % (Math.PI * 2);
+      else p.mesh.rotation.x = p.mesh.rotation.x % (Math.PI * 2);
     }
-    return v;
+  });
 }
 
-function project4Dto2D(p) {
-    // p: [x,y,z,w]
-    // first project 4D->3D using w as extra depth
-    let wPerspective = map(p[3], -2, 2, 1.4, 0.3); // use w to change perspective (time depth)
-    let scaleBase = min(width, height) * 0.16;
-    let x3 = p[0] * scaleBase * wPerspective;
-    let y3 = p[1] * scaleBase * wPerspective;
-    let z3 = p[2] * scaleBase * wPerspective * 0.5;
+// Global rotation/orbit
+let globalRotation = { x: 0.12, y: 0.02 };
 
-    // simple 3D->2D perspective: simulate camera distance changing with mouse Y
-    let camZ = map(mouseY, 0, height, 900, 2200);
-    let perspective = camZ / (camZ - z3);
-    let sx = x3 * perspective;
-    let sy = y3 * perspective;
+// Interaction: raycaster for clicks
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+function onPointerMove(evt) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const x = (evt.clientX - rect.left) / rect.width;
+  const y = (evt.clientY - rect.top) / rect.height;
+  pointer.x = x * 2 - 1;
+  pointer.y = - (y * 2 - 1);
 
-    return { x: sx, y: sy, depth: z3, w: p[3] };
+  // parallax target camera offset
+  targetCamX = (x - 0.5) * 120;
+  targetCamY = (y - 0.5) * 60;
+
+  lastInteraction = performance.now();
 }
+function onPointerDown(evt) {
+  // click / tap: test intersected panel and trigger faster flip
+  const rect = renderer.domElement.getBoundingClientRect();
+  const x = (evt.clientX - rect.left) / rect.width;
+  const y = (evt.clientY - rect.top) / rect.height;
+  pointer.x = x * 2 - 1;
+  pointer.y = - (y * 2 - 1);
 
-// Serialize frame as segments for history drawing
-function serializeFrame(points2D) {
-    // we want a list of segments [ [x1,y1],[x2,y2], ... ] from edges
-    let segs = [];
-    for (let e of edges) {
-        let a = points2D[e[0]];
-        let b = points2D[e[1]];
-        if (!a || !b) continue;
-        segs.push([{ x: a.x, y: a.y }, { x: b.x, y: b.y }]);
+  raycaster.setFromCamera(pointer, camera);
+  const intersects = raycaster.intersectObjects(tGroup.children, true);
+  if (intersects.length > 0) {
+    // find top-level panel mesh parent
+    let hit = intersects[0].object;
+    while (hit && !panels.find(p => p.mesh === hit)) {
+      hit = hit.parent;
     }
-    return segs;
-}
-
-function drawHistoryLines(hist) {
-    // draw older frames with increasing blur and lower alpha to create echoes
-    push();
-    translate(width / 2, height / 2);
-    for (let i = 0; i < hist.length; i++) {
-        let age = hist.length - 1 - i; // 0 is newest, larger is older
-        let alpha = map(age, 0, hist.length - 1, 160, 6);
-        let sw = map(age, 0, hist.length - 1, 1.6, 0.2);
-        stroke(255, alpha * 0.75);
-        strokeWeight(sw);
-        for (let s of hist[i]) {
-            line(s[0].x, s[0].y, s[1].x, s[1].y);
-        }
+    const panel = panels.find(p => p.mesh === hit);
+    if (panel) {
+      triggerFlip(panel, 2.2, Math.random() < 0.5 ? 'x' : 'y');
+      lastInteraction = performance.now();
     }
-    pop();
+  }
 }
 
-function createBurst(points2D, intensity) {
-    // create temporary shards radiating from center based on current geometry
-    // We'll draw a handful of fast-decaying lines directly to canvas (no history)
-    push();
-    translate(width / 2, height / 2);
-    let count = floor(map(intensity, 0, 12, 10, 40, true));
-    for (let i = 0; i < count; i++) {
-        let e = edges[floor(random(edges.length))];
-        let a = points2D[e[0]], b = points2D[e[1]];
-        if (!a || !b) continue;
-        let mx = (a.x + b.x) / 2;
-        let my = (a.y + b.y) / 2;
-        let dir = createVector(mx, my).normalize();
-        let len = random(80, 380) * (0.6 + (intensity / 6));
-        stroke(255, random(120, 255));
-        strokeWeight(random(0.6, 2.4));
-        line(mx, my, mx + dir.x * len, my + dir.y * len);
-        // small split shards
-        if (random() < 0.35) {
-            let ang = atan2(dir.y, dir.x);
-            let a1 = ang + random(-0.6, 0.6);
-            line(mx, my, mx + cos(a1) * len * random(0.35, 0.75), my + sin(a1) * len * random(0.35, 0.75));
-        }
-    }
-    pop();
+// camera parallax smoothing
+let camX = 0, camY = 0, targetCamX = 0, targetCamY = 0;
+function updateCameraLerp(dt) {
+  camX += (targetCamX - camX) * clamp(dt * 0.01, 0.06, 0.45);
+  camY += (targetCamY - camY) * clamp(dt * 0.01, 0.06, 0.45);
+  camera.position.x = camX;
+  camera.position.y = camY;
+  camera.lookAt(0, 0, 0);
 }
 
-// touch support: map touches to mouse
-function touchMoved() {
-    // prevent scrolling on mobile when interacting
-    return false;
-}
+// inactivity & auto-cycling
+let lastInteraction = performance.now();
+let lastAutoFlip = performance.now();
+const IDLE_THRESHOLD = 5000; // ms
+const AUTO_FLIP_INTERVAL = 1400; // ms when idle
 
-// keep a compact smoothing for deltaTime
-let lastFrameTime = performance.now();
-let deltaTime = 16;
-function _updateDeltaTime() {
-    let now = performance.now();
-    deltaTime = now - lastFrameTime;
-    lastFrameTime = now;
-}
-setInterval(_updateDeltaTime, 16);
-
-// prevent context menu on canvas (long press)
-document.addEventListener('contextmenu', event => {
-    if (event.target.tagName.toLowerCase() === 'canvas') {
-        event.preventDefault();
-    }
+// minimal UI
+document.getElementById('pauseBtn').addEventListener('click', e => {
+  paused = !paused;
+  e.target.innerText = paused ? 'Resume' : 'Pause';
 });
+document.getElementById('randomBtn').addEventListener('click', _ => {
+  const p = panels[Math.floor(Math.random() * panels.length)];
+  triggerFlip(p, 2.4, Math.random() < 0.5 ? 'x' : 'y');
+  lastInteraction = performance.now();
+});
+
+// build the scene
+buildPanels();
+
+// animation loop
+let paused = false;
+let last = performance.now();
+function animate(now = performance.now()) {
+  const dt = now - last;
+  last = now;
+
+  if (!paused) {
+    // gentle global rotation, slightly responsive to time
+    tGroup.rotation.y += globalRotation.y * (1 + Math.sin(now * 0.0004) * 0.6);
+    tGroup.rotation.x += globalRotation.x * 0.0006;
+
+    // update flips
+    updateFlips(now);
+
+    // auto flips when idle
+    const idle = now - lastInteraction;
+    if (idle > IDLE_THRESHOLD && (now - lastAutoFlip) > AUTO_FLIP_INTERVAL) {
+      const chance = 0.55; // biased to flip
+      if (Math.random() < chance) {
+        const p = panels[Math.floor(Math.random() * panels.length)];
+        triggerFlip(p, clamp(0.5 + (Math.random() * 2.5), 0.6, 3.2), Math.random() < 0.5 ? 'x' : 'y');
+      }
+      lastAutoFlip = now;
+    }
+
+    // camera parallax damping
+    updateCameraLerp(dt);
+
+    // subtle overlapping additive pulsing for FAR zone panels
+    const glow = (1 + Math.sin(now * 0.002)) * 0.5;
+    panels.forEach(p => {
+      if (p.zone.id === 'FAR') {
+        p.mesh.material.opacity = clamp(0.6 + glow * 0.4, 0.5, 1.2);
+      } else {
+        p.mesh.material.opacity = 1.0;
+      }
+    });
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+// pointer events
+window.addEventListener('pointermove', onPointerMove, { passive: true });
+window.addEventListener('pointerdown', onPointerDown);
+
+// responsive
+function onResize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', onResize);
+
+// Init small camera jitter and starting tilt
+camera.position.set(10, 6, 1000);
+tGroup.rotation.set(0.18, 0.04, 0.0);
+
+// initial subtle movement target
+targetCamX = 0;
+targetCamY = 0;
+
+// Prevent context menu on canvas
+renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
