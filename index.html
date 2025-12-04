@@ -1,1 +1,83 @@
+<!doctype html>
+<html lang="en">
 
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Tesseract of Time — Black & White</title>
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      background: #000;
+      /* black background to keep contrast crisp */
+      color: #fff;
+      font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    #ui {
+      position: fixed;
+      right: 18px;
+      top: 18px;
+      z-index: 10;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      user-select: none;
+    }
+
+    button {
+      background: transparent;
+      border: 1px solid #fff;
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      backdrop-filter: blur(6px);
+      font-weight: 600;
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    .small {
+      font-size: 12px;
+      padding: 6px 8px;
+      border-radius: 6px;
+    }
+
+    .label {
+      font-size: 12px;
+      opacity: 0.85;
+      margin-right: 6px;
+    }
+
+    #hint {
+      position: fixed;
+      left: 18px;
+      bottom: 18px;
+      color: #bbb;
+      font-size: 13px;
+      opacity: 0.9;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="ui">
+    <button id="saveBtn" class="small">Save PNG</button>
+    <button id="clearBtn" class="small">Clear Echoes</button>
+    <button id="pauseBtn" class="small">Pause</button>
+  </div>
+  <div id="hint">Move your mouse / touch. Fast = bursts. Slow = layers. Press Save to export.</div>
+
+  <!-- p5.js -->
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.6.0/lib/p5.min.js"></script>
+  <script src="sketch.js"></script>
+</body>
+
+</html>
